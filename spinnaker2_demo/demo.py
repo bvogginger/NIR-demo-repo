@@ -11,8 +11,11 @@
 
 # In[1]:
 
+import time
+start_time = time.time()
 
 # Import statements
+import os
 from matplotlib import pyplot as plt
 import nir
 import numpy as np
@@ -21,6 +24,17 @@ import tonic
 import torch
 from tqdm.notebook import tqdm
 from spinnaker2 import brian2_sim, hardware, helpers, s2_nir, snn
+import spinnaker2.neuron_models.lif_neuron
+import spinnaker2.neuron_models.lif_conv2d
+from spinnaker2.neuron_models.common import DVFSParams, PmgtMode
+
+# set custom DVFS params
+if True:
+    dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=30)
+    dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=200)
+    spinnaker2.neuron_models.lif_neuron.LIFNoDelayApplication.dvfs_params = dvfs_lif_neuron
+    spinnaker2.neuron_models.lif_conv2d.LIFConv2dApplication.dvfs_params = dvfs_lif_conv2d
+sys_tick_in_s = 2.0e-3
 
 # Matplotlib settings
 plt.rcParams["figure.figsize"] = (10, 6)
@@ -49,7 +63,7 @@ s2_nir.model_summary(nir_graph)
 
 # Configuration for converting NIR graph to SpiNNaker2
 conversion_cfg = s2_nir.ConversionConfig()
-conversion_cfg.output_record = ["v", "spikes", "time_done"]
+conversion_cfg.output_record = ["v", "spikes", "time_done", "n_packets"]
 conversion_cfg.dt = 0.0001
 conversion_cfg.conn_delay = 0
 conversion_cfg.scale_weights = True # Scale weights to dynamic range on chip
@@ -91,16 +105,16 @@ for pop in net.populations:
     if pop.name == "input":
         pop.record = ["time_done"]
     if pop.name == "1":
-        pop.record = ["time_done"]
+        pop.record = ["time_done", "n_packets"]
     if pop.name == "3":
         pop.set_max_atoms_per_core(256)
-        pop.record = ["time_done"]
+        pop.record = ["time_done", "n_packets"]
     if pop.name == "6":
-        pop.set_max_atoms_per_core(128)
-        pop.record = ["time_done"]
+        pop.set_max_atoms_per_core(64)
+        pop.record = ["time_done", "n_packets"]
     if pop.name == "10":
-        pop.set_max_atoms_per_core(16)
-        pop.record = ["time_done"]
+        pop.set_max_atoms_per_core(8)
+        pop.record = ["time_done", "n_packets"]
 
 
 # ### Convert input data to spikes
@@ -138,35 +152,39 @@ def run_single(hw, net, inp, outp, x):
       x: input sample of shape (T,C,H,W)
       
     Returns:
-      tuple (voltages, spikes): voltages and spikes of output layer
+      tuple (voltages, spikes, time_done_dict, n_packets_dict): voltages and
+      spikes of output layer, time_done and n_packets dict of all layers.
     """
     input_spikes = convert_input(x)
     inp[0].params = input_spikes
 
     timesteps = x.shape[0] + 1
     net.reset()
-    hw.run(net, timesteps, sys_tick_in_s=2.5e-3, debug=False)
+    print(f"Run for {timesteps} time steps")
+    hw.run(net, timesteps, sys_tick_in_s=sys_tick_in_s, debug=False)
     voltages = outp[0].get_voltages()
     spikes = outp[0].get_spikes()
 
 
     time_done_times_dict = {}
     time_done_times = outp[0].get_time_done_times()
-    print(time_done_times) # prints out the dictonary
-    helpers.save_dict_to_npz(time_done_times, "time_done_output.npz")
     time_done_times_dict[outp[0].name] = time_done_times
-
 
     for pop in net.populations:
         if pop.name in ["input", "1", "3", "6", "10"]:
             time_done_times = pop.get_time_done_times()
-            helpers.save_dict_to_npz(time_done_times, f"time_done_{pop.name}.npz")
             time_done_times_dict[pop.name] = time_done_times
 
-    with open("time_done_results.pkl", "wb") as fp:
-        pickle.dump(time_done_times_dict, fp)
+    n_packets_dict = {}
+    n_packets = outp[0].get_n_packets()
+    n_packets_dict[outp[0].name] = n_packets
 
-    return voltages, spikes
+    for pop in net.populations:
+        if pop.name in ["1", "3", "6", "10"]:
+            n_packets = pop.get_n_packets()
+            n_packets_dict[pop.name] = n_packets
+
+    return voltages, spikes, time_done_times_dict, n_packets_dict
 
 
 # ### Some helper functions
@@ -219,14 +237,21 @@ def test_sample(target):
     plt.title("Input")
     
     # run on SpiNNaker 2
-    hw = hardware.SpiNNaker2Chip(eth_ip="192.168.1.25")
+    hw = hardware.SpiNNaker2Chip(eth_ip="192.168.2.33")
     # hw = brian2_sim.Brian2Backend()
 
-    voltages, spikes = run_single(hw, net, inp, outp, sample)
+    voltages, spikes, time_done_dict, n_packets_dict = run_single(hw, net, inp, outp, sample)
     del hw
     
     prediction = plot_hist(spikes, target)
     print(f"SpiNNaker2 prediction: {prediction}")
+
+    with open("time_done_results.pkl", "wb") as fp:
+        pickle.dump(time_done_dict, fp)
+
+    with open("n_packets_results.pkl", "wb") as fp:
+        pickle.dump(n_packets_dict, fp)
+
 
 
 # ## Live demo
@@ -239,6 +264,7 @@ def test_sample(target):
 test_sample(2)
 
 
+
 # ## Send test data to the chip and read out its prediction
 # To get some quantitative idea about how well the on-chip model does, we can use the test data from above and run it through the chip. **Note: this will take more than 6 minutes!!!**
 
@@ -248,13 +274,20 @@ test_sample(2)
 def run_subset():
     correct = 0
     predictions = []
-    for (sample, target) in tqdm(subset, total=len(subset)):
+    result_dir = "results_subset_mapping_2_dvfs"
+    if not os.path.exists(result_dir):
+        os.makedirs(result_dir)
+
+    for i, (sample, target) in enumerate(tqdm(subset, total=len(subset))):
+
+        if not os.path.exists(f"{result_dir}/sample_{i}"):
+            os.makedirs(f"{result_dir}/sample_{i}")
 
         # run on SpiNNaker 2
-        hw = hardware.SpiNNaker2Chip(eth_ip="192.168.1.25")
+        hw = hardware.SpiNNaker2Chip(eth_ip="192.168.2.33")
         # hw = brian2_sim.Brian2Backend()
 
-        voltages, spikes = run_single(hw, net, inp, outp, sample)
+        voltages, spikes, time_done_dict, n_packets_dict = run_single(hw, net, inp, outp, sample)
         del hw
 
         spike_counts = np.zeros(10)
@@ -265,6 +298,13 @@ def run_subset():
         correct += (prediction == target)
         predictions.append(prediction)
 
+        # save time done and n packets
+        with open(f"{result_dir}/sample_{i}/time_done_results.pkl", "wb") as fp:
+            pickle.dump(time_done_dict, fp)
+
+        with open(f"{result_dir}/sample_{i}/n_packets_results.pkl", "wb") as fp:
+            pickle.dump(n_packets_dict, fp)
+
     accuracy = correct / len(subset)
     print(f"Test accuracy on SpiNNaker2: {accuracy:.2%}")
 
@@ -273,4 +313,7 @@ def run_subset():
 
 
 # run_subset()
+
+end_time = time.time()
+print("Duration: ", end_time - start_time)
 
