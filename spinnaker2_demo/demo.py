@@ -22,19 +22,50 @@ import numpy as np
 import pickle
 import tonic
 import torch
+import json
 from tqdm.notebook import tqdm
 from spinnaker2 import brian2_sim, hardware, helpers, s2_nir, snn
 import spinnaker2.neuron_models.lif_neuron
 import spinnaker2.neuron_models.lif_conv2d
 from spinnaker2.neuron_models.common import DVFSParams, PmgtMode
+from spinnaker2_stm.read_power import PowerMeasurement
+
+dvfs_mode = "calibration" # "high", "low", "auto", "calibration"
+record_time_done_and_n_packets = False
 
 # set custom DVFS params
-if True:
-    dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=30)
-    dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=200)
-    spinnaker2.neuron_models.lif_neuron.LIFNoDelayApplication.dvfs_params = dvfs_lif_neuron
-    spinnaker2.neuron_models.lif_conv2d.LIFConv2dApplication.dvfs_params = dvfs_lif_conv2d
-sys_tick_in_s = 2.0e-3
+if dvfs_mode == "low":
+    dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=0)
+    dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=0)
+    sys_tick_in_s = 2.0e-3
+    record_time_done_and_n_packets = False
+    measure_power = True
+
+elif dvfs_mode == "high":
+    dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_HIGH, pl_threshold=0)
+    dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_HIGH, pl_threshold=0)
+    sys_tick_in_s = 1.0e-3
+    record_time_done_and_n_packets = False
+    measure_power = True
+
+elif dvfs_mode == "auto":
+    dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_AUTO, pl_threshold=30)
+    dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_AUTO, pl_threshold=200)
+    sys_tick_in_s = 1.0e-3
+    record_time_done_and_n_packets = False
+    measure_power = True
+
+elif dvfs_mode == "calibration":
+    # calibration mode to extract the statistics about time_done vs. n_packets.
+    # uses low performance level but long simulation time
+    dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=0)
+    dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_LOW, pl_threshold=0)
+    sys_tick_in_s = 10.0e-3
+    record_time_done_and_n_packets = True
+    measure_power = False
+
+spinnaker2.neuron_models.lif_neuron.LIFNoDelayApplication.dvfs_params = dvfs_lif_neuron
+spinnaker2.neuron_models.lif_conv2d.LIFConv2dApplication.dvfs_params = dvfs_lif_conv2d
 
 # Matplotlib settings
 plt.rcParams["figure.figsize"] = (10, 6)
@@ -102,19 +133,21 @@ subset = torch.utils.data.Subset(dataset, indices)
 
 # Customize neurons per core per population
 for pop in net.populations:
-    if pop.name == "input":
-        pop.record = ["time_done"]
-    if pop.name == "1":
-        pop.record = ["time_done", "n_packets"]
     if pop.name == "3":
         pop.set_max_atoms_per_core(256)
-        pop.record = ["time_done", "n_packets"]
     if pop.name == "6":
         pop.set_max_atoms_per_core(64)
-        pop.record = ["time_done", "n_packets"]
     if pop.name == "10":
         pop.set_max_atoms_per_core(8)
-        pop.record = ["time_done", "n_packets"]
+
+# enable time_done and n_packets recording
+if record_time_done_and_n_packets:
+    for pop in net.populations:
+        if pop.name == "input":
+            pop.record = ["time_done"]
+        elif pop.name in ["1", "3", "6", "10"]:
+            pop.record = ["time_done", "n_packets"]
+
 
 
 # ### Convert input data to spikes
@@ -152,8 +185,9 @@ def run_single(hw, net, inp, outp, x):
       x: input sample of shape (T,C,H,W)
       
     Returns:
-      tuple (voltages, spikes, time_done_dict, n_packets_dict): voltages and
-      spikes of output layer, time_done and n_packets dict of all layers.
+      tuple (voltages, spikes, time_done_dict, n_packets_dict, energy):
+      voltages and spikes of output layer, time_done and n_packets dict of all
+      layers, measured energy.
     """
     input_spikes = convert_input(x)
     inp[0].params = input_spikes
@@ -161,7 +195,10 @@ def run_single(hw, net, inp, outp, x):
     timesteps = x.shape[0] + 1
     net.reset()
     print(f"Run for {timesteps} time steps")
-    hw.run(net, timesteps, sys_tick_in_s=sys_tick_in_s, debug=False)
+
+    hw.run(net, timesteps, sys_tick_in_s=sys_tick_in_s, debug=False, measure_power=measure_power)
+
+    energy = hw.energy
     voltages = outp[0].get_voltages()
     spikes = outp[0].get_spikes()
 
@@ -184,7 +221,7 @@ def run_single(hw, net, inp, outp, x):
             n_packets = pop.get_n_packets()
             n_packets_dict[pop.name] = n_packets
 
-    return voltages, spikes, time_done_times_dict, n_packets_dict
+    return voltages, spikes, time_done_times_dict, n_packets_dict, energy
 
 
 # ### Some helper functions
@@ -240,7 +277,7 @@ def test_sample(target):
     hw = hardware.SpiNNaker2Chip(eth_ip="192.168.2.33")
     # hw = brian2_sim.Brian2Backend()
 
-    voltages, spikes, time_done_dict, n_packets_dict = run_single(hw, net, inp, outp, sample)
+    voltages, spikes, time_done_dict, n_packets_dict, energy = run_single(hw, net, inp, outp, sample)
     del hw
     
     prediction = plot_hist(spikes, target)
@@ -261,7 +298,7 @@ def test_sample(target):
 # In[9]:
 
 
-test_sample(2)
+# test_sample(2)
 
 
 
@@ -274,7 +311,8 @@ test_sample(2)
 def run_subset():
     correct = 0
     predictions = []
-    result_dir = "results_subset_mapping_2_dvfs"
+    energies = []
+    result_dir = f"results_subset_{dvfs_mode}"
     if not os.path.exists(result_dir):
         os.makedirs(result_dir)
 
@@ -287,7 +325,7 @@ def run_subset():
         hw = hardware.SpiNNaker2Chip(eth_ip="192.168.2.33")
         # hw = brian2_sim.Brian2Backend()
 
-        voltages, spikes, time_done_dict, n_packets_dict = run_single(hw, net, inp, outp, sample)
+        voltages, spikes, time_done_dict, n_packets_dict, energy = run_single(hw, net, inp, outp, sample)
         del hw
 
         spike_counts = np.zeros(10)
@@ -305,14 +343,34 @@ def run_subset():
         with open(f"{result_dir}/sample_{i}/n_packets_results.pkl", "wb") as fp:
             pickle.dump(n_packets_dict, fp)
 
-    accuracy = correct / len(subset)
+        if energy is not None:
+            energies.append(energy)
+        else:
+            energies.append(0.0)
+
+    n_samples = len(subset)
+    accuracy = correct / n_samples
     print(f"Test accuracy on SpiNNaker2: {accuracy:.2%}")
+    print(f"Total energy for {n_samples} samples on SpiNNaker2: {np.sum(energies):.3f} J")
+    mean_energy = np.mean(energies)
+    print(f"Mean energy per sample on SpiNNaker2: {mean_energy:.3f} J")
+    
+    # save results to file
+
+    results = dict(
+            n_samples=n_samples,
+            accuracy=accuracy,
+            energies=energies,
+            mean_energy=mean_energy,
+            )
+    with open(f"{result_dir}/all_results.json", "w") as fp:
+        json.dump(results, fp, indent=2)
 
 
 # In[11]:
 
 
-# run_subset()
+run_subset()
 
 end_time = time.time()
 print("Duration: ", end_time - start_time)

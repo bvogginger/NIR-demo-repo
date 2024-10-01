@@ -1,6 +1,7 @@
 from mmap import mmap
 import re
 from datetime import datetime, timezone
+import json
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -97,10 +98,14 @@ def plot_P_t(filepath, rdout_delay, bus_volt, t_start=None, t_end=None, plot_all
         #t2 = datetime.fromtimestamp(t_end)
         print(t1)
         #print(duration)
+        result_str = f"Duration: {duration:.3f} s\nEnergy: {energy:.3f} J"
+        props = dict(boxstyle='round', facecolor='wheat')
+        plt.text(.01, .99, result_str, ha="left", va="top", transform=plt.gca().transAxes, bbox=props)
 
     plt.ylabel('shunt power [mW]')
     plt.xlabel('time [s]')
     plt.legend(loc='upper right')
+    plt.savefig("power_measurement.pdf")
     plt.show()
 
 
@@ -119,8 +124,11 @@ if __name__ == "__main__":
     t_start = 232069315874527
     t_end = 232069942164073
 
-    filepath = "power_record.log"
-    t_start = 304874801891804
-    t_end = 304875432051548
+    filepath = "my_power_record.log"
+    with open("results.json", "r") as f:
+        results = json.load(f)
+    profiling = results["profiling"]
+    t_start = profiling["t_experiment_start"]
+    t_end = profiling["t_experiment_done"]
     plot_P_t(filepath, rdout_delay=100, bus_volt=volt, t_start=t_start, t_end=t_end, plot_all=True)
 

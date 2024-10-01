@@ -8,11 +8,11 @@ import numpy as np
 from spinnaker2 import helpers
 from plot_time_done import plot_time_done_vs_n_packets
 
-sys_tick_in_s=2.0e-3
+sys_tick_in_s=10.0e-3
 # load 
 
 n_samples = 50
-sweep_dir = "results_subset_mapping_2_dvfs/"
+sweep_dir = "results_subset_calibration/"
 all_time_done = [] # list[{layer : {PE : np.array}}}
 all_n_packets = [] # list[{layer : {PE : np.array}}}
 for i in range(n_samples):
