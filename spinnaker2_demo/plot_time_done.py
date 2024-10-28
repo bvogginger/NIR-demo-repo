@@ -20,8 +20,9 @@ def plot_time_done_vs_n_packets(time_done, n_packets, sys_tick_in_s, layer=None)
     plt.show()
 
 if __name__ == "__main__":
-    sys_tick_in_s=2.5e-3
+    sys_tick_in_s=10e-3
 
+    """
     for pop in ["input", "1", "3", "6", "10", "output"][:0]:
         filepath = f"time_done_{pop}.npz"
         npzfile = np.load(filepath, allow_pickle=True)
@@ -34,6 +35,7 @@ if __name__ == "__main__":
         print("Mean:", times.mean())
 
         helpers.plot_times_done_multiple_pes_one_plot_vertical(filepath, sys_tick_in_s)
+    """
 
     with open("time_done_results.pkl", "rb") as fp:
         time_done_dict = pickle.load(fp)

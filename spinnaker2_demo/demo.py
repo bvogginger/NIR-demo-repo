@@ -30,7 +30,7 @@ import spinnaker2.neuron_models.lif_conv2d
 from spinnaker2.neuron_models.common import DVFSParams, PmgtMode
 from spinnaker2_stm.read_power import PowerMeasurement
 
-dvfs_mode = "calibration" # "high", "low", "auto", "calibration"
+dvfs_mode = "auto" # "high", "low", "auto", "calibration"
 record_time_done_and_n_packets = False
 
 # set custom DVFS params
@@ -52,7 +52,7 @@ elif dvfs_mode == "auto":
     dvfs_lif_conv2d = DVFSParams(mode=PmgtMode.PL_MODE_AUTO, pl_threshold=30)
     dvfs_lif_neuron = DVFSParams(mode=PmgtMode.PL_MODE_AUTO, pl_threshold=200)
     sys_tick_in_s = 1.0e-3
-    record_time_done_and_n_packets = False
+    record_time_done_and_n_packets = True
     measure_power = True
 
 elif dvfs_mode == "calibration":
@@ -94,7 +94,7 @@ s2_nir.model_summary(nir_graph)
 
 # Configuration for converting NIR graph to SpiNNaker2
 conversion_cfg = s2_nir.ConversionConfig()
-conversion_cfg.output_record = ["v", "spikes", "time_done", "n_packets"]
+conversion_cfg.output_record = ["v", "spikes", "time_done", "n_packets", "performance_level"]
 conversion_cfg.dt = 0.0001
 conversion_cfg.conn_delay = 0
 conversion_cfg.scale_weights = True # Scale weights to dynamic range on chip
@@ -146,7 +146,7 @@ if record_time_done_and_n_packets:
         if pop.name == "input":
             pop.record = ["time_done"]
         elif pop.name in ["1", "3", "6", "10"]:
-            pop.record = ["time_done", "n_packets"]
+            pop.record = ["time_done", "n_packets", "performance_level"]
 
 
 
@@ -185,8 +185,8 @@ def run_single(hw, net, inp, outp, x):
       x: input sample of shape (T,C,H,W)
       
     Returns:
-      tuple (voltages, spikes, time_done_dict, n_packets_dict, energy):
-      voltages and spikes of output layer, time_done and n_packets dict of all
+      tuple (voltages, spikes, time_done_dict, n_packets_dict, performance_level_dict, energy):
+      voltages and spikes of output layer, time_done, n_packets and performance_level dict of all
       layers, measured energy.
     """
     input_spikes = convert_input(x)
@@ -221,7 +221,14 @@ def run_single(hw, net, inp, outp, x):
             n_packets = pop.get_n_packets()
             n_packets_dict[pop.name] = n_packets
 
-    return voltages, spikes, time_done_times_dict, n_packets_dict, energy
+    # performance levels
+    pl_dict = {}
+    for pop in net.populations:
+        if pop.name in ["1", "3", "6", "10", "12"]:
+            pls = pop.get_performance_levels()
+            pl_dict[pop.name] = pls 
+
+    return voltages, spikes, time_done_times_dict, n_packets_dict, pl_dict, energy
 
 
 # ### Some helper functions
@@ -277,7 +284,7 @@ def test_sample(target):
     hw = hardware.SpiNNaker2Chip(eth_ip="192.168.2.33")
     # hw = brian2_sim.Brian2Backend()
 
-    voltages, spikes, time_done_dict, n_packets_dict, energy = run_single(hw, net, inp, outp, sample)
+    voltages, spikes, time_done_dict, n_packets_dict, pl_dict, energy = run_single(hw, net, inp, outp, sample)
     del hw
     
     prediction = plot_hist(spikes, target)
@@ -289,6 +296,8 @@ def test_sample(target):
     with open("n_packets_results.pkl", "wb") as fp:
         pickle.dump(n_packets_dict, fp)
 
+    with open("performance_level_results.pkl", "wb") as fp:
+        pickle.dump(pl_dict, fp)
 
 
 # ## Live demo
@@ -298,7 +307,9 @@ def test_sample(target):
 # In[9]:
 
 
-# test_sample(2)
+test_sample(2)
+
+exit(-1)
 
 
 
@@ -325,7 +336,7 @@ def run_subset():
         hw = hardware.SpiNNaker2Chip(eth_ip="192.168.2.33")
         # hw = brian2_sim.Brian2Backend()
 
-        voltages, spikes, time_done_dict, n_packets_dict, energy = run_single(hw, net, inp, outp, sample)
+        voltages, spikes, time_done_dict, n_packets_dict, pl_dict, energy = run_single(hw, net, inp, outp, sample)
         del hw
 
         spike_counts = np.zeros(10)
@@ -342,6 +353,9 @@ def run_subset():
 
         with open(f"{result_dir}/sample_{i}/n_packets_results.pkl", "wb") as fp:
             pickle.dump(n_packets_dict, fp)
+
+        with open(f"{result_dir}/sample_{i}/performance_level_results.pkl", "wb") as fp:
+            pickle.dump(pl_dict, fp)
 
         if energy is not None:
             energies.append(energy)
